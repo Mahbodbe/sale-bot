@@ -1,0 +1,16 @@
+[Unit]
+Description=Telegram sales accounting bot (Mahgol)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/sales-bot
+ExecStart=/root/sales-bot/venv/bin/python bot.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/sales-bot.log
+StandardError=append:/var/log/sales-bot.log
+
+[Install]
+WantedBy=multi-user.target

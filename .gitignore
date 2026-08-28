@@ -1,0 +1,20 @@
+# ── secrets & local state ──────────────────────────────────────────────
+.env
+*.db
+*.db-journal
+*.db-wal
+
+# ── python ─────────────────────────────────────────────────────────────
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# ── editors / OS ───────────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store

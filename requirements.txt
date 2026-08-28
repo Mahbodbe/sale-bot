@@ -1,0 +1,2 @@
+python-telegram-bot==21.9
+jdatetime==6.1.0
