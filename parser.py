@@ -52,15 +52,26 @@ _AMOUNT_RE = re.compile(
     r"(?![\w\u0600-\u06FF])",  # not followed by more letters
 )
 
-# "دو تا مگنت" / "۳ تا استیکر" / "2 عدد" — how many pieces the post covers.
+# "دو تا مگنت" / "۳ تا استیکر" / "2 عدد" — how many pieces a line covers.
 _WORD_QUANTITIES = {
     "یک": 1, "یه": 1, "دو": 2, "سه": 3, "چهار": 4, "چار": 4, "پنج": 5,
     "شش": 6, "شیش": 6, "هفت": 7, "هشت": 8, "نه": 9, "ده": 10,
 }
 _QTY_WORD_ALT = "|".join(sorted(_WORD_QUANTITIES, key=len, reverse=True))
-_COUNTER = r"(?:تا|عدد|دونه|دانه|جفت)"
 
-_QTY_RE = re.compile(rf"(?:^|\s)({_QTY_WORD_ALT}|\d{{1,2}})\s*{_COUNTER}(?:\s|$)")
+# A "جفت" (pair) is two pieces, so the counter itself carries a multiplier.
+_COUNTERS = {"تا": 1, "عدد": 1, "دونه": 1, "دانه": 1, "جفت": 2, "ست": 1}
+_COUNTER_ALT = "|".join(sorted(_COUNTERS, key=len, reverse=True))
+
+_QTY_RE = re.compile(
+    rf"(?:^|\s)({_QTY_WORD_ALT}|\d{{1,2}})\s*({_COUNTER_ALT})(?:\s|$|\u200c)"
+)
+
+# "دونه‌ای ۲۰۰t" / "هرکدوم ۲۰۰t" / "هر دونه ۲۰۰t" — the price is per piece,
+# so it must be multiplied by the quantity even when only one price is given.
+_EACH_RE = re.compile(
+    r"(?:دونه\s*ای|دانه\s*ای|عددی|هر\s*کدوم|هرکدوم|هر\s*دونه|هر\s*عدد|هر\s*یک)"
+)
 
 
 def _to_int(raw: str) -> int:
@@ -73,52 +84,126 @@ def _to_int(raw: str) -> int:
 
 
 def parse_amounts(text: str) -> list[int]:
-    """Every amount written before a ``t``, in the order they appear.
-
-    A post with two differently-priced pieces lists both prices:
-
-        دو تا مگنت یخچال (دوربین، شیشه آبنبات)
-        ۲۰۰t
-        ۳۰۰t
-    """
+    """Every amount written before a ``t``, in the order they appear."""
     norm = normalize(text)
     return [n for n in (_to_int(m.group(1)) for m in _AMOUNT_RE.finditer(norm)) if n]
 
 
-def parse_quantity(text: str) -> int:
-    """How many pieces the post mentions — 1 when it does not say."""
-    m = _QTY_RE.search(normalize(text))
+def _line_quantity(line: str) -> int | None:
+    """Pieces this line declares, or ``None`` when it declares none."""
+    m = _QTY_RE.search(line)
     if not m:
-        return 1
-    token = m.group(1)
-    if token.isdigit():
-        qty = int(token)
-    else:
-        qty = _WORD_QUANTITIES.get(token, 1)
-    # Guard against nonsense like "۵۰ تا" in a description.
-    return qty if 1 <= qty <= 20 else 1
+        return None
+
+    token, counter = m.group(1), m.group(2)
+    base = int(token) if token.isdigit() else _WORD_QUANTITIES.get(token, 1)
+    qty = base * _COUNTERS.get(counter, 1)
+    # Guard against a stray big number in prose blowing up a total.
+    return qty if 1 <= qty <= 40 else None
+
+
+def parse_quantity(text: str) -> int:
+    """Total pieces the post covers — 1 when nothing is stated."""
+    return sum(item.quantity for item in parse_items(text)) or 1
+
+
+# ── line items ─────────────────────────────────────────────────────────
+@dataclass
+class LineItem:
+    """One priced line of a post: how many pieces, at what price(s)."""
+
+    quantity: int
+    prices: list[int]
+    each: bool          # price was written as "per piece"
+    label: str          # the descriptive line this item came from
+
+    @property
+    def total(self) -> int:
+        if len(self.prices) > 1:
+            # Each piece got its own price; the list is already the whole truth.
+            return sum(self.prices)
+        return self.prices[0] * self.quantity
+
+
+def parse_items(text: str, today: "jdatetime.date | None" = None) -> list[LineItem]:
+    """Split a post into priced line items.
+
+    A post may describe several different products, each with its own count and
+    price, and the price may be written per piece::
+
+        یک جفت گیره پهن        → 2 pieces
+        دونه‌ای ۲۰۰t           → 200 each  → 400
+        یک عدد گیره باریک کوتاه → 1 piece
+        ۱۵۰t                    → 150      → 150
+                                              ────
+                                              550
+
+    Consecutive price lines belong to the same product, so a count in the title
+    with several prices under it means one price per piece::
+
+        دو تا مگنت
+        ۲۰۰t
+        ۳۰۰t                    → 500, not 1000
+    """
+    items: list[LineItem] = []
+    pending_qty = 1
+    pending_label = ""
+    open_item: LineItem | None = None       # the item still collecting prices
+
+    for raw_line in normalize(text).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        prices = [p for p in (_to_int(m.group(1)) for m in _AMOUNT_RE.finditer(line)) if p]
+        qty = _line_quantity(line)
+
+        if not prices:
+            # A descriptive line closes any item that was collecting prices and
+            # remembers its own count for the price line(s) that follow.
+            open_item = None
+            if parse_jalali_date(line, today=today) is not None:
+                continue
+            if qty is not None:
+                pending_qty, pending_label = qty, line
+            else:
+                pending_label = pending_label or line
+            continue
+
+        # A priced line without its own count continues the previous product.
+        if qty is None and open_item is not None:
+            open_item.prices.extend(prices)
+            continue
+
+        line_qty = qty if qty is not None else pending_qty
+        open_item = LineItem(
+            quantity=line_qty,
+            prices=list(prices),
+            each=bool(_EACH_RE.search(line)),
+            label=pending_label or line,
+        )
+        items.append(open_item)
+        pending_qty, pending_label = 1, ""
+
+    return items
 
 
 def parse_amount(text: str) -> int | None:
     """Total value of a post, or ``None`` when it carries no amount.
 
-    Three shapes show up in the channel:
+    Shapes seen in the channel:
 
     * one piece, one price — ``۷۰۰t`` → 700
-    * several pieces at *different* prices, each listed — ``۲۰۰t`` ``۳۰۰t`` → 500
-    * several pieces at the *same* price, written once, with the count in the
-      title — ``دو تا مگنت`` + ``۲۰۰t`` → 400
+    * several pieces, one price each listed — ``۲۰۰t`` ``۳۰۰t`` → 500
+    * several pieces at the same price — ``دو تا مگنت`` + ``۲۰۰t`` → 400
+    * several *products*, each with its own count and price::
+
+          یک جفت گیره پهن / دونه‌ای ۲۰۰t / یک عدد گیره باریک / ۱۵۰t → 550
     """
-    amounts = parse_amounts(text)
-    if not amounts:
+    items = parse_items(text)
+    if not items:
         return None
-
-    if len(amounts) > 1:
-        # Prices are spelled out per piece; trust the list.
-        return sum(amounts)
-
-    # Single price: multiply by the stated piece count.
-    return amounts[0] * parse_quantity(text)
+    return sum(item.total for item in items)
 
 
 # ── Jalali date ────────────────────────────────────────────────────────
@@ -180,16 +265,18 @@ class Sale:
     raw: str
     prices: list[int]     # the individual prices found in the post
     quantity: int         # pieces the post covers
+    items: list[LineItem] # one entry per priced product line
 
 
 def parse_sale(text: str, today: jdatetime.date | None = None) -> Sale | None:
     """Parse a channel post into a :class:`Sale`, or ``None`` if no amount."""
-    prices = parse_amounts(text)
-    if not prices:
+    line_items = parse_items(text, today=today)
+    if not line_items:
         return None
 
-    quantity = len(prices) if len(prices) > 1 else parse_quantity(text)
-    amount = sum(prices) if len(prices) > 1 else prices[0] * quantity
+    amount = sum(it.total for it in line_items)
+    prices = [p for it in line_items for p in it.prices]
+    quantity = sum(it.quantity for it in line_items)
 
     sale_date = parse_jalali_date(text, today=today)
 
@@ -205,12 +292,21 @@ def parse_sale(text: str, today: jdatetime.date | None = None) -> Sale | None:
             continue
         leftovers.append(line)
 
+    # With several products, name them all so the confirmation is readable.
+    if len(line_items) > 1:
+        item = " + ".join(it.label for it in line_items)
+        event = leftovers[-1] if len(leftovers) > len(line_items) else ""
+    else:
+        item = leftovers[0] if leftovers else ""
+        event = leftovers[1] if len(leftovers) > 1 else ""
+
     return Sale(
         amount=amount,
         sale_date=sale_date,
-        item=leftovers[0] if leftovers else "",
-        event=leftovers[1] if len(leftovers) > 1 else "",
+        item=item,
+        event=event,
         raw=text.strip(),
         prices=prices,
         quantity=quantity,
+        items=line_items,
     )

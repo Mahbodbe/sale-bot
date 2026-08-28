@@ -11,6 +11,7 @@ import store
 from parser import (
     parse_amount,
     parse_amounts,
+    parse_items,
     parse_jalali_date,
     parse_quantity,
     parse_sale,
@@ -95,6 +96,80 @@ def test_absurd_quantity_is_ignored():
     text = "۵۰ تا مگنت\n۲۰۰t\nآلما\n۶ شهریور۱۴۰۵"
     assert parse_quantity(text) == 1          # guard against runaway totals
     assert parse_amount(text) == 200
+
+
+# ── multi-product posts (a count and price per product line) ───────────
+def test_pair_with_per_piece_price_and_second_product():
+    """The exact shape from the channel: جفت + دونه‌ای, then a second item."""
+    text = (
+        "یک جفت گیره پهن \n"
+        "دونه‌ای ۲۰۰t\n"
+        "یک عدد گیره باریک کوتاه \n"
+        "۱۵۰t\n"
+        "ایونت آلما \n"
+        " ۶ شهریور۱۴۰۵"
+    )
+    items = parse_items(text)
+    assert len(items) == 2
+    assert (items[0].quantity, items[0].prices, items[0].total) == (2, [200], 400)
+    assert (items[1].quantity, items[1].prices, items[1].total) == (1, [150], 150)
+    assert parse_amount(text) == 550
+
+
+def test_pair_counts_as_two_pieces():
+    text = "یک جفت گوشواره\n۳۰۰t\nآلما\n۶ شهریور۱۴۰۵"
+    assert parse_quantity(text) == 2
+    assert parse_amount(text) == 600
+
+
+def test_two_pairs_with_per_piece_price():
+    text = "۲ جفت گیره\nعددی ۱۰۰t\nآلما\n۶ شهریور۱۴۰۵"
+    assert parse_quantity(text) == 4
+    assert parse_amount(text) == 400
+
+
+def test_three_products_each_with_own_count():
+    text = (
+        "دو تا مگنت\nدونه‌ای ۲۰۰t\n"
+        "یک عدد کیچین\n۱۵۰t\n"
+        "سه تا استیکر\nهرکدوم ۵۰t\n"
+        "آلما\n۶ شهریور۱۴۰۵"
+    )
+    items = parse_items(text)
+    assert [it.total for it in items] == [400, 150, 150]
+    assert parse_amount(text) == 700
+
+
+def test_consecutive_prices_stay_one_product():
+    """Two prices under one title are per-piece prices, not a new product."""
+    text = "دو تا مگنت یخچال\n۲۰۰t\n۳۰۰t\nآلما\n۶ شهریور۱۴۰۵"
+    items = parse_items(text)
+    assert len(items) == 1
+    assert items[0].prices == [200, 300]
+    assert parse_amount(text) == 500          # not 1000
+
+
+def test_single_product_still_one_item():
+    text = "سنجاق سینه جا عینکی\n۷۰۰t\nایونت آلما\n۶ شهریور۱۴۰۵"
+    items = parse_items(text)
+    assert len(items) == 1
+    assert parse_amount(text) == 700
+
+
+def test_multi_product_sale_names_every_product():
+    text = "یک جفت گیره پهن\nدونه‌ای ۲۰۰t\nیک عدد گیره باریک\n۱۵۰t\nآلما\n۶ شهریور۱۴۰۵"
+    sale = parse_sale(text, today=TODAY_J)
+    assert sale.amount == 550
+    assert sale.quantity == 3                 # 2 + 1 pieces
+    assert "گیره پهن" in sale.item and "گیره باریک" in sale.item
+    assert len(sale.items) == 2
+
+
+def test_each_marker_is_detected():
+    text = "سه تا استیکر\nدونه‌ای ۵۰t\nآلما\n۶ شهریور۱۴۰۵"
+    items = parse_items(text)
+    assert items[0].each is True
+    assert parse_amount(text) == 150
 
 
 # ── dates ──────────────────────────────────────────────────────────────

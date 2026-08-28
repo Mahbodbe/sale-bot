@@ -167,8 +167,20 @@ async def on_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         total, count, _, _ = store.grand_total(conn)
         when = jalali_str(sale.sale_date) if sale.sale_date else "تاریخ خوانده نشد"
 
-        if len(sale.prices) > 1:
-            breakdown = " + ".join(f"{fa(p)}" for p in sale.prices)
+        if len(sale.items) > 1:
+            # Several products: show the arithmetic line by line.
+            detail = ["مبلغ: *" + fa(sale.amount) + " t*", ""]
+            for it in sale.items:
+                if len(it.prices) > 1:
+                    calc = " + ".join(fa(p) for p in it.prices)
+                elif it.quantity > 1:
+                    calc = f"{fa_plain(it.quantity)} × {fa(it.prices[0])} = {fa(it.total)}"
+                else:
+                    calc = fa(it.total)
+                detail.append(f"• {it.label} — {calc}")
+            amount_line = "\n".join(detail)
+        elif len(sale.prices) > 1:
+            breakdown = " + ".join(fa(p) for p in sale.prices)
             amount_line = f"مبلغ: *{fa(sale.amount)} t*  ({breakdown})"
         elif sale.quantity > 1:
             amount_line = (
@@ -178,14 +190,12 @@ async def on_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             amount_line = f"مبلغ: *{fa(sale.amount)} t*"
 
-        await msg.reply_text(
-            f"ثبت شد ✅\n"
-            f"{amount_line}\n"
-            f"کالا: {sale.item or '؟'}\n"
-            f"تاریخ: {when}\n\n"
-            f"جمع کل دفتر: *{fa(total)} t* در {fa(count)} فروش",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        body = f"ثبت شد ✅\n{amount_line}\n"
+        if len(sale.items) == 1:
+            body += f"کالا: {sale.item or '؟'}\n"
+        body += f"تاریخ: {when}\n\nجمع کل دفتر: *{fa(total)} t* در {fa(count)} فروش"
+
+        await msg.reply_text(body, parse_mode=ParseMode.MARKDOWN)
 
 
 # ── queries ────────────────────────────────────────────────────────────
